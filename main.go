@@ -1,27 +1,33 @@
 package main
 
 import (
-	"github.com/stellar/go/clients/horizon"
-	"net/http"
-	"encoding/json"
 	"context"
-	"time"
+	"encoding/json"
 	"github.com/go-chi/chi"
-	"sync"
+	"github.com/stellar/go/clients/horizon"
+	"io/ioutil"
+	"net/http"
 	"strconv"
+	"sync"
+	"time"
 )
+
 var (
-	mu      sync.Mutex
-	seq int32
-	mem []pair
+	mutex          sync.Mutex
+	sequenceNumber int32
+	memory         []pair
 )
+
+const horizonAddress = "http://127.0.0.1:8000"
+const port = ":3000"
+const offerOperationId = 3
 
 type pair struct {
-	Time time.Time `json:"time"`
-	Off horizon.Offer `json:"off"`
+	Time  time.Time     `json:"time"`
+	Offer horizon.Offer `json:"offer"`
 }
 
-type LedgerPage struct{
+type LedgerPage struct {
 	Links struct {
 		Self horizon.Link `json:"self"`
 		Next horizon.Link `json:"next"`
@@ -32,125 +38,146 @@ type LedgerPage struct{
 	} `json:"_embedded"`
 }
 
-func dbGetOffer(start, end string) *pair{
-	var p *pair
-	s, err := time.Parse(time.RFC3339,end)
-	if err != nil{
-		panic(err)
+func dbGetOffer(start, end string) []pair {
+	var result []pair
+
+	s, err := time.Parse(time.RFC3339, end)
+	if err != nil {
+		println(err)
 	}
 	e, err := time.Parse(time.RFC3339, start)
-	if err != nil{
-		panic(err)
+	if err != nil {
+		println(err)
 	}
-	mu.Lock()
-	for i := range mem{
-		if s.Before(mem[i].Time) && e.After(mem[i].Time){
-			p = &mem[i]
-			break
+
+	mutex.Lock()
+	for _, v := range memory {
+		if s.After(v.Time) && e.Before(v.Time) {
+			result = append(result, v)
 		}
 	}
-	mu.Unlock()
-	return p
+	mutex.Unlock()
+
+	return result
 }
 
 func offerCtx(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	var offer *pair
-	var err error
-	if start, end := chi.URLParam(r, "start"), chi.URLParam(r, "end"); start != "" && end != ""{
-		offer = dbGetOffer(start, end)
-	} else {
-		w.Write([]byte("Not found"))
-		return
-	}
-	if err != nil {
-		w.Write([]byte("Not found"))
-		return
-	}
+		var offers []pair
 
-	ctx := context.WithValue(r.Context(), "offer", offer)
-	next.ServeHTTP(w, r.WithContext(ctx))
-})
+		if start, end := chi.URLParam(r, "start"), chi.URLParam(r, "end"); start != "" && end != "" {
+			offers = dbGetOffer(start, end)
+		} else {
+			js, err := json.Marshal([]byte("Not found"))
+
+			if err != nil {
+				println(err)
+			}
+
+			w.Write(js)
+			return
+		}
+		ctx := context.WithValue(r.Context(), "offers", offers)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
-func GetOffer(w http.ResponseWriter, r *http.Request){
-	offer := r.Context().Value("offer").(*pair)
+func GetOffer(w http.ResponseWriter, r *http.Request) {
+	offer := r.Context().Value("offers").([]pair)
 	js, err := json.Marshal(offer)
-	if err != nil{
+	if err != nil {
 		panic(err)
 	}
 	w.Write(js)
 }
 
-func main(){
+func getCursor(client *horizon.Client) string {
+	resp, err := client.HTTP.Get(client.URL + "/ledgers?limit=1")
+	if err != nil {
+		panic(err)
+	}
+	buffer, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		panic(err)
+	}
+	var page LedgerPage
+	err = json.Unmarshal(buffer, &page)
+	if err != nil {
+		panic(err)
+	}
 
+	return page.Embedded.Records[0].PT
+}
+
+func fetchLedgers() {
 
 	client := &horizon.Client{
 		HTTP: http.DefaultClient,
-		URL:"http://127.0.0.1:8000",
-	}
-	buffer := make([]byte, 4096)
-
-	resp, err := client.HTTP.Get(client.URL+"/ledgers?limit=1")
-	if err != nil{
-		panic(err)
+		URL:  horizonAddress,
 	}
 
-	size, _ := resp.Body.Read(buffer)
-	var page LedgerPage
-	err = json.Unmarshal(buffer[0:size], &page)
-	if err != nil{
-		panic(err)
-	}
-	//client.StreamTransactions()
-	cur := horizon.Cursor(string(page.Embedded.Records[0].PT))
-	go client.StreamLedgers(context.TODO(),
+	pagingToken := getCursor(client)
+
+	cur := horizon.Cursor(pagingToken)
+
+	client.StreamLedgers(context.TODO(),
 		&cur,
-		func(ledger horizon.Ledger){
-			mu.Lock()
-			seq = ledger.Sequence
-			mu.Unlock()
+		func(ledger horizon.Ledger) {
+			mutex.Lock()
+			sequenceNumber = ledger.Sequence
+			mutex.Unlock()
 
-			if err != nil{
-				panic(err)
-			}
-
-			if ledger.OperationCount != 0{
+			if ledger.OperationCount != 0 {
 				resp, err := client.HTTP.Get(ledger.Links.Operations.Href)
-				if err != nil{
-					panic(err)
+				if err != nil {
+					println(err)
 				}
-				size, _ := resp.Body.Read(buffer)
+				buffer, err := ioutil.ReadAll(resp.Body)
+				if err != nil {
+					println(err)
+				}
+
 				var op horizon.OffersPage
-				var OpType struct{
+				var OpType struct {
 					TypeI int `json:"type_i"`
 				}
-				err = json.Unmarshal(buffer[0:size], OpType)
-				if err != nil{
-					panic(err)
-				}
-				if OpType.TypeI != 3{
-					return
-				}
-				err = json.Unmarshal(buffer[0:size],&op)
-				if err != nil{
-					panic(err)
+				err = json.Unmarshal(buffer, OpType)
+
+				if err != nil {
+					println(err)
 				}
 
-				for index := range op.Embedded.Records {
-					mu.Lock()
-					mem = append(mem, pair{Time: ledger.ClosedAt, Off: op.Embedded.Records[index]})
-					mu.Unlock()
+				if OpType.TypeI != offerOperationId {
+					return
 				}
+
+				err = json.Unmarshal(buffer, &op)
+				if err != nil {
+					println(err)
+				}
+				mutex.Lock()
+				for _, offer := range op.Embedded.Records {
+					memory = append(memory, pair{Time: ledger.ClosedAt, Offer: offer})
+				}
+				mutex.Unlock()
 			} else {
-				time.Sleep(time.Second)
 				return
 			}
 		})
+}
+
+func main() {
+	go fetchLedgers()
 
 	router := chi.NewRouter()
 	router.Get("/ledger", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(strconv.FormatInt(int64(seq), 10)))
+		js, err := json.Marshal([]byte(strconv.FormatInt(int64(sequenceNumber), 10)))
+
+		if err != nil {
+			println(err)
+		}
+
+		w.Write(js)
 	})
 
 	router.Get("/offers{?start,end}", func(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +185,6 @@ func main(){
 		router.Get("/", GetOffer)
 	})
 
-	http.ListenAndServe(":3000", router)
+	http.ListenAndServe(port, router)
 
 }
