@@ -18,9 +18,18 @@
 
 [[projects]]
   name = "github.com/go-chi/chi"
-  packages = ["."]
+  packages = [
+    ".",
+    "middleware"
+  ]
   revision = "e83ac2304db3c50cf03d96a2fcd39009d458bc35"
   version = "v3.3.2"
+
+[[projects]]
+  name = "github.com/go-chi/render"
+  packages = ["."]
+  revision = "9f855fadd4b8cde7773f9ef51f6b2705af239519"
+  version = "v1.0.0"
 
 [[projects]]
   name = "github.com/go-errors/errors"
@@ -130,6 +139,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "14f757310febc0eae8179beca036a3d6bdd739272a5657e47c35f338b433b264"
+  inputs-digest = "35aec7b62f22a28d41aba7bf6edf2a2da02ae130f2bb5d65535ed071df712ad8"
   solver-name = "gps-cdcl"
   solver-version = 1
