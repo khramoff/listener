@@ -143,7 +143,7 @@ func ledgerHandler(ledger horizon.Ledger) {
 	}
 }
 
-func fetchLedgers() {
+func fetchLedgers(client *horizon.Client) {
 
 	pagingToken := getCursor(client)
 
@@ -153,7 +153,7 @@ func fetchLedgers() {
 }
 
 func main() {
-	go fetchLedgers()
+	go fetchLedgers(client)
 
 	router := chi.NewRouter()
 	router.Use(middleware.Logger)
