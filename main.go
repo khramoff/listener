@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -34,7 +35,7 @@ type pair struct {
 }
 
 type Response struct {
-	Ledger  string `json:"ledger,omitempty"`
+	Ledger  int32  `json:"ledger,omitempty"`
 	Records []pair `json:"records,omitempty"`
 	Errors  string `json:"errors,omitempty"`
 }
@@ -50,26 +51,41 @@ type LedgerPage struct {
 	} `json:"_embedded"`
 }
 
-func dbGetOffer(start, end string) []pair {
-	print("parsing time")
-	var result []pair
-
-	s, err := time.Parse(time.RFC3339, start)
-	if err != nil {
-		log.Error(err)
-	}
-	e, err := time.Parse(time.RFC3339, end)
-	if err != nil {
-		log.Error(err)
-	}
-
-	mutex.Lock()
-	for _, v := range memory {
-		if s.Before(v.Time) && e.After(v.Time) {
-			result = append(result, v)
+func fixLink(url string) string {
+	var result string
+	for i := range url {
+		if r, _ := utf8.DecodeRuneInString(url[i:]); r == '{' {
+			result = url[0:i]
 		}
 	}
-	mutex.Unlock()
+	return result
+}
+
+func dbGetOffer(start, end string) []pair {
+	result := make([]pair, len(memory), cap(memory)+1)
+	if start == "" || end == "" {
+		mutex.Lock()
+		copy(result, memory)
+		mutex.Unlock()
+	} else {
+
+		s, err := time.Parse(time.RFC3339, start)
+		if err != nil {
+			log.Error(err)
+		}
+		e, err := time.Parse(time.RFC3339, end)
+		if err != nil {
+			log.Error(err)
+		}
+
+		mutex.Lock()
+		for _, v := range memory {
+			if s.Before(v.Time) && e.After(v.Time) {
+				result = append(result, v)
+			}
+		}
+		mutex.Unlock()
+	}
 	return result
 }
 
@@ -87,12 +103,11 @@ func getCursor(client *horizon.Client) string {
 	if err != nil {
 		log.Error(err)
 	}
-
 	return page.Embedded.Records[0].PT
 }
 
 func offersExist(offer horizon.Offer) bool {
-	if offer.Seller != "" && offer.Price != "" {
+	if offer.Amount != "" && offer.Price != "" {
 		return true
 	} else {
 		return false
@@ -104,7 +119,7 @@ func addOffers(buffer []byte, closed time.Time) {
 
 	err := json.Unmarshal(buffer, &offersPage)
 	if err != nil {
-		log.Error(err)
+		log.Debug(err)
 	}
 	mutex.Lock()
 	for _, offer := range offersPage.Embedded.Records {
@@ -118,7 +133,7 @@ func addOffers(buffer []byte, closed time.Time) {
 }
 
 func operationHandler(link string, closed time.Time) {
-	resp, err := client.HTTP.Get(link)
+	resp, err := client.HTTP.Get(fixLink(link))
 	if err != nil {
 		log.Error(err)
 	}
@@ -138,8 +153,6 @@ func ledgerHandler(ledger horizon.Ledger) {
 
 	if ledger.OperationCount != 0 {
 		operationHandler(ledger.Links.Operations.Href, ledger.ClosedAt)
-	} else {
-		return
 	}
 }
 
@@ -162,7 +175,7 @@ func main() {
 
 	router.Get("/ledger", func(w http.ResponseWriter, r *http.Request) {
 		var js Response
-		js.Ledger = string(sequenceNumber)
+		js.Ledger = sequenceNumber
 		resp, err := json.Marshal(js)
 
 		if err != nil {
